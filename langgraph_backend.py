@@ -23,6 +23,7 @@ import os
 import json
 from langchain_core.messages import SystemMessage
 from rag_backend import retrieve_context
+# pyrefly: ignore [missing-import]
 from groq import APIError as GroqAPIError
 
 load_dotenv()
