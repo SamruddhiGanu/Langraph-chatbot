@@ -1,8 +1,7 @@
 # pyrefly: ignore [missing-import]
 import streamlit as st
-from langgraph_backend import chatbot, checkpointer, conn
+from langgraph_backend import chatbot, checkpointer, conn, ingest_pdf, get_loaded_filename
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from rag_backend import process_pdf, get_loaded_filename
 import uuid
 
 # =========================== Utilities ===========================
@@ -79,7 +78,7 @@ if uploaded_pdf is not None:
     if st.session_state.get("loaded_pdf_name") != uploaded_pdf.name:
         with st.sidebar.status("Processing PDF…", expanded=True) as s:
             st.write(f"📖 Reading `{uploaded_pdf.name}`…")
-            n_chunks = process_pdf(uploaded_pdf.read(), uploaded_pdf.name)
+            n_chunks = ingest_pdf(uploaded_pdf.read(), uploaded_pdf.name)
             st.session_state["loaded_pdf_name"] = uploaded_pdf.name
             st.session_state["loaded_pdf_chunks"] = n_chunks
             s.update(label="✅ PDF indexed!", state="complete", expanded=False)
@@ -142,39 +141,50 @@ if user_input:
 
     # Assistant streaming block
     with st.chat_message("assistant"):
-        # Use a mutable holder so the generator can set/modify it
         status_holder = {"box": None}
 
         def ai_only_stream():
-            for message_chunk, metadata in chatbot.stream(
+            for message_chunk, _ in chatbot.stream(
                 {"messages": [HumanMessage(content=user_input)]},
                 config=CONFIG,
                 stream_mode="messages",
             ):
-                # Lazily create & update the SAME status container when any tool runs
                 if isinstance(message_chunk, ToolMessage):
                     tool_name = getattr(message_chunk, "name", "tool")
                     if status_holder["box"] is None:
                         status_holder["box"] = st.status(
-                            f"🔧 Using `{tool_name}` …", expanded=True
+                            f"🔧 Using `{tool_name}`…", expanded=True
                         )
                     else:
                         status_holder["box"].update(
-                            label=f"🔧 Using `{tool_name}` …",
+                            label=f"🔧 Using `{tool_name}`…",
                             state="running",
                             expanded=True,
                         )
 
-                # Stream ONLY assistant tokens
-                if isinstance(message_chunk, AIMessage):
+                if isinstance(message_chunk, AIMessage) and message_chunk.content:
                     yield message_chunk.content
 
-        ai_message = st.write_stream(ai_only_stream())
+        try:
+            ai_message = st.write_stream(ai_only_stream())
+        except Exception as e:
+            err = str(e)
+            if "rate_limit_exceeded" in err or "429" in err:
+                import re
+                wait = re.search(r"try again in ([\d\w.]+)", err)
+                wait_str = wait.group(1) if wait else "a few minutes"
+                st.warning(
+                    f"⏳ **Groq rate limit reached.** Please wait **{wait_str}** and try again.\n\n"
+                    "Tip: You can also switch to a different model in `.env` or upgrade your Groq account."
+                )
+                ai_message = f"[Rate limit hit — please wait {wait_str}]"
+            else:
+                st.error(f"❌ Error: {err}")
+                ai_message = f"[Error: {err}]"
 
-        # Finalize only if a tool was actually used
         if status_holder["box"] is not None:
             status_holder["box"].update(
-                label="✅ Tool finished", state="complete", expanded=False
+                label="✅ Done", state="complete", expanded=False
             )
 
     # Save assistant message

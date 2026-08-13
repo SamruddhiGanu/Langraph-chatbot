@@ -7,6 +7,7 @@ import math
 from collections import Counter
 
 import numpy as np
+# pyrefly: ignore [missing-import]
 from pypdf import PdfReader
 import io
 
