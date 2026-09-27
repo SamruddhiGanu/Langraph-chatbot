@@ -1,73 +1,220 @@
-![Uploading image.png…]()
+## 3. Detailed Component Architecture
 
-3. Detailed Component Architecture
-A. Presentation Layer (
+### A. Presentation Layer — `streamlit_tools.py`
 
-streamlit_tools.py
-)
-Session Lifecycle: Automatically creates unique thread_id UUIDs stored in st.session_state.
-State Caching: Uses @st.cache_resource for the LangGraph instance (_get_app()) and database connections (_get_conn()) to prevent cold-start reloads.
-Dual Execution Modes:
-Streaming Chat Mode: Uses app.stream(..., stream_mode="messages") combined with st.write_stream() for token-by-token visual feedback and real-time tool execution status boxes.
-Status-Tracked Blog Mode: Uses app.invoke(...) with st.status() to track routing, research, drafting, and image generation phases.
-B. Intent Router (
+The presentation layer provides the Streamlit-based user interface and manages the lifecycle of conversations.
 
-graph/intent_router.py
-)
-Uses the lightweight openai/gpt-oss-20b model with low temperature (0.0).
-Inspects the latest user input and classifies it into:
-"blog": For explicit requests to write articles, guides, essays, or blog posts.
-"chat": For all questions, chit-chat, calculations, PDF queries, and general tasks.
-C. Conversational Agent Subgraph (
+**Session Lifecycle**
 
-graph/chat/
-)
-Architecture: Standard ReAct cycle (agent $\rightarrow$ tools $\rightarrow$ agent $\rightarrow$ END).
-Tool Calling:
-tavily_search: Searches the live web when questions involve real-time info or current events.
-search_pdf: Calls rag_backend.retrieve_context(query, k=4) to extract context from any uploaded document.
-D. Multi-Agent Blog Generation Subgraph (
+* Automatically generates a unique `thread_id` using UUID.
+* Stores the `thread_id` in `st.session_state` to maintain conversation identity.
 
-graph/blog/
-)
-1. Router Node (
+**State Caching**
 
-router_node.py
-): Determines if external research is needed or if it is a general closed-book topic.
-2. Research Node (
+* Uses `@st.cache_resource` to cache the LangGraph application instance and database connections.
+* Prevents unnecessary re-initialization and improves application startup performance.
 
-research_node.py
-): Generates search queries, searches Tavily/PDF, parses passages, and builds an evidence dossier.
-3. Orchestrator Node (
+**Dual Execution Modes**
 
-orchestrator_node.py
-): Generates a structured outline (BlogPlan) and uses LangGraph Send("worker", ...) to dispatch section writing jobs in parallel.
-4. Worker Node (
+**1. Streaming Chat Mode**
 
-worker_node.py
-): Writes a specific section adhering to tone, constraints, and curated evidence snippets.
-5. Reducer Pipeline (
+* Uses `app.stream(..., stream_mode="messages")`.
+* Displays LLM responses token-by-token using `st.write_stream()`.
+* Provides real-time visibility into tool execution and intermediate states.
 
-reducer.py
-):
-merge_content: Stitches section results in index order.
-decide_images: Uses structured LLM output (GlobalImagePlan) to place 1–3 visual anchor placeholders ({{IMAGE_1}}).
-generate_and_place_images: Calls Pollinations.ai, saves .png files to data/images/, and replaces placeholders with markdown image syntax.
-E. In-Memory RAG Engine (
+**2. Status-Tracked Blog Mode**
 
-rag_backend.py
-)
-Document Parsing: pypdf.PdfReader extracts page-by-page text.
-Chunking: Sliding window chunker configured with:
-Chunk size: 150 words
-Overlap: 20 words
-Step size: 130 words
-Indexing & Retrieval:
-Custom term-frequency (TF) and smoothed inverse document frequency (IDF) matrix.
-L2-normalized vectors; retrieval via matrix-vector dot product (cosine similarity) returning Top-$k$ passages with page numbers.
-F. Memory & Persistence (
+* Uses `app.invoke()` for the complete blog-generation workflow.
+* Uses Streamlit status components to display progress through:
 
-graph/memory.py
-)
-Uses SqliteSaver connected to newchatbot.db.
-Stores conversation histories across sessions keyed by thread_id so conversations can be reloaded and resumed.
+  * Routing
+  * Research
+  * Drafting
+  * Image generation
+
+---
+
+### B. Intent Router — `graph/intent_router.py`
+
+The intent router determines which workflow should handle the user's request.
+
+* Uses the lightweight `openai/gpt-oss-20b` model.
+* Uses a low temperature (`0.0`) for consistent classification.
+* Inspects the latest user message and classifies it into two categories:
+
+| Intent | Description                                                            |
+| ------ | ---------------------------------------------------------------------- |
+| `blog` | Requests to write articles, guides, essays, or blog posts              |
+| `chat` | Questions, conversations, calculations, PDF queries, and general tasks |
+
+The router then directs the request to the appropriate LangGraph subgraph.
+
+---
+
+### C. Conversational Agent Subgraph — `graph/chat/`
+
+The chat workflow follows a standard **ReAct (Reasoning + Acting) cycle**:
+
+```text
+User Input
+    ↓
+Agent
+    ↓
+Tool Selection
+    ↓
+Tool Execution
+    ↓
+Agent
+    ↓
+END
+```
+
+#### Tool Calling
+
+The conversational agent can use external tools when required:
+
+* **`tavily_search`** — Searches the live web for current or real-time information.
+* **`search_pdf`** — Retrieves relevant context from uploaded PDFs using `rag_backend.retrieve_context(query, k=4)`.
+
+This allows the conversational agent to combine general LLM reasoning with external information and document-specific retrieval.
+
+---
+
+### D. Multi-Agent Blog Generation Subgraph — `graph/blog/`
+
+The blog workflow is implemented as a multi-agent pipeline consisting of routing, research, planning, parallel section generation, reduction, and image generation.
+
+#### 1. Router Node — `router_node.py`
+
+Determines whether the requested topic requires external research or can be handled as a general closed-book topic.
+
+```text
+User Topic
+    ↓
+Router
+    ├── Closed-book
+    └── Requires Research
+```
+
+#### 2. Research Node — `research_node.py`
+
+When research is required, this node:
+
+1. Generates search queries.
+2. Searches Tavily and/or uploaded PDFs.
+3. Extracts and parses relevant passages.
+4. Builds an evidence dossier for downstream agents.
+
+The evidence dossier provides curated information that the writing agents can use while generating the blog.
+
+#### 3. Orchestrator Node — `orchestrator_node.py`
+
+Creates a structured `BlogPlan` containing the sections required for the article.
+
+It then uses LangGraph's `Send()` mechanism to dispatch individual section-writing tasks to worker nodes in parallel.
+
+```text
+                 ┌── Worker → Section 1
+                 │
+Orchestrator ────┼── Worker → Section 2
+                 │
+                 └── Worker → Section 3
+```
+
+This enables parallel generation of independent blog sections.
+
+#### 4. Worker Node — `worker_node.py`
+
+Each worker is responsible for writing one specific section.
+
+The worker receives:
+
+* Section requirements
+* Writing tone and constraints
+* Relevant evidence snippets
+* The overall blog context
+
+It then produces the requested section while following the provided constraints.
+
+#### 5. Reducer Pipeline — `reducer.py`
+
+The reducer combines the outputs from the parallel workers and performs the final content-processing steps.
+
+**`merge_content`**
+
+* Combines generated sections.
+* Restores the original section order.
+
+**`decide_images`**
+
+* Uses structured LLM output (`GlobalImagePlan`) to determine where visual content should be placed.
+* Creates 1–3 image placeholders such as:
+
+```text
+{{IMAGE_1}}
+{{IMAGE_2}}
+```
+
+**`generate_and_place_images`**
+
+* Generates images using Pollinations.ai.
+* Saves generated `.png` files under `data/images/`.
+* Replaces image placeholders with Markdown image syntax.
+
+Overall workflow:
+
+```text
+Router
+   ↓
+Research
+   ↓
+Orchestrator
+   ↓
+Parallel Workers
+   ↓
+Merge Content
+   ↓
+Image Planning
+   ↓
+Image Generation
+   ↓
+Final Blog
+```
+
+---
+
+### E. In-Memory RAG Engine — `rag_backend.py`
+
+The RAG engine provides document ingestion, chunking, indexing, and retrieval for uploaded PDFs.
+
+#### Document Parsing
+
+Uses `pypdf.PdfReader` to extract text from PDFs on a page-by-page basis.
+
+```text
+PDF
+ ↓
+PdfReader
+ ↓
+Page-level text
+```
+
+#### Chunking
+
+The extracted text is divided using a **sliding-window chunking strategy**.
+
+Configuration:
+
+| Parameter  |     Value |
+| ---------- | --------: |
+| Chunk size | 150 words |
+| Overlap    |  20 words |
+| Step size  | 130 words |
+
+For example:
+
+```text
+Chunk 1: words 1–150
+Chunk 2: words 131–
+```
+<img width="4047" height="8192" alt="Text Chunking Process Model-2026-09-27-044450" src="https://github.com/user-attachments/assets/cc39add4-0db0-4a56-b947-de4fbce819d4" />
